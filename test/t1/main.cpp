@@ -3,6 +3,9 @@
 #include <pthread.h>
 #include <stdint.h>
 #define UNUSED(x) (void)(x)
+#define println(format, ...)            \
+    printf(format "\n", \
+            ##__VA_ARGS__)
 
 #define DEBUG
 
@@ -59,7 +62,7 @@ void Sendc(eth_emu *self, uint8_t d,bool over)
 #endif
     self->Receive(self, d,over);
 
-    printf("rec[%d]:%d %s\n", self->id, d,(over)?("over"):(""));
+    printf("rec[%d]:0x%x %s\n", self->id, d,(over)?("over"):(""));
 }
 void Receivec(eth_emu *self, uint8_t d,bool over)
 {
@@ -97,9 +100,22 @@ typedef struct
 
     int send_pos;
     int recv_pos;
+
+    bool _recv_esc;
 } ioe_MAC_Message_t;
+typedef union 
+{
+    ioe_MAC_Message_t msg;
+    struct{
+        uint8_t DA[6];
+        uint8_t RA[6];
+        uint8_t Type[2];
+
+    } info;
+}ioe_MAC_Message_identify_union;
 typedef struct ioe_MAC_Recv_t
 {
+    uint8_t addr[6];
     ioe_MAC_Message_t *msg;
     void (*Complete_Callback)(ioe_MAC_t *mac);
 } ioe_MAC_Recv_t;
@@ -117,12 +133,20 @@ void ioe_MAC_Init(ioe_MAC_t *mac, eth_emu *dev)
 void ioe_MAC2ETH_Send(ioe_MAC_t *mac, ioe_MAC_Message_t *s)
 {
     eth_emu *dev = mac->dev;
-    int *i = &(s->send_pos); // i <- send_pos
-    for (*i = 0; *i < s->size-1; (*i)++)
-    {
-        dev->Send(dev, s->content[*i],0);
+    for(int i=0;i<7;i++){
+        dev->Send(dev, 0xAA,0); //前导码
     }
-    dev->Send(dev, s->content[s->size-1],1);//最后一个给over信号
+    dev->Send(dev, 0xAB,0); //界定符1010 1011
+    int *i = &(s->send_pos); // i <- send_pos
+    for (*i = 0; *i < s->size; (*i)++)
+    {
+        uint8_t d=s->content[*i];
+        if(d==(0xAB & 0xFF) || d=='\\'){
+            dev->Send(dev, '\\',(*i)==(s->size-1));
+        }
+        dev->Send(dev, d,(*i)==(s->size-1));//最后一个给over信号
+    }
+
 }
 
 void _ioe_MAC2ETH_Recv_Handle(eth_emu *from, ioe_MAC_t *to, uint8_t d,bool over)
@@ -149,11 +173,7 @@ void ioe_MAC2ETH_Init_Recv(ioe_MAC_t *mac, ioe_MAC_Message_t *recv_buf, void (*M
     mac->recv_handler.Complete_Callback = MAC_Message_Recv_Complete_Callback;
     mac->recv_handler.msg = recv_buf;
 
-    mac->recv_handler.msg->size       =0;
-    mac->recv_handler.msg->send_finish=0;
-    mac->recv_handler.msg->recv_finish=0;
-    mac->recv_handler.msg->send_pos   =0;
-    mac->recv_handler.msg->recv_pos   =0;
+    *mac->recv_handler.msg=(ioe_MAC_Message_t){.size=100};
 
     eth_emu_Init_Recv(dev, _ioe_MAC2ETH_Recv_Handle);
 }
@@ -163,13 +183,21 @@ void example_MAC_Message_Recv_Complete_Callback(ioe_MAC_t *mac)
     // printf
 }
 
+void print_mac_msg(ioe_MAC_Message_t* msg){
+    ioe_MAC_Message_identify_union a={.msg=*msg};
+    uint8_t *DA=a.info.DA;
+    println("DA(mac):%x:%x:%x:%x:%x:%x",DA[0],DA[1],DA[2],DA[3],DA[4],DA[5]);
+    for(int i=0;i<msg->size;i++){
+        //printf
+    }
+}
 int main()
 {
     ioe_MAC_Message_t buf = {0};
     eth_emu eth1 = {0};
     ioe_MAC_Message_t mac_msg = {
-        .content = {1, 2},
-        .size = 2};
+        .content = {'\\',1, 2},
+        .size = 5};
     Init_eth_emu(&eth1, 2);
     ioe_MAC_t mac1 = {0};
     ioe_MAC_Init(&mac1, &eth1);
@@ -177,6 +205,8 @@ int main()
     ioe_MAC2ETH_Init_Recv(&mac1, &buf, example_MAC_Message_Recv_Complete_Callback);
 
     ioe_MAC2ETH_Send(&mac1, &mac_msg);
+
+    print_mac_msg(&mac_msg);
     printf("%d \n",buf.content[0]);
     // sem_t s1;
     // sem_init(&s1,0,0);
